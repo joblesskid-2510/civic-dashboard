@@ -1,22 +1,53 @@
-import os, io, math, json, datetime, pandas as pd, numpy as np
+# app.py — Civic Risk Dashboard (debris/landfill + water + “garbage near water”)
+# Streamlit + Earth Engine (Service Account via st.secrets)
+# ---------------------------------------------------------------
+
+import os, json, math, datetime
+import numpy as np
+import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw
 import folium
 from streamlit_folium import st_folium
+
 import ee
 import geemap.foliumap as geemap
 
-# ------------ CONFIG ------------
-DEFAULT_AOI = [78.2, 17.1, 78.7, 17.65]  # Hyderabad-ish
-PROJECT_ID = st.secrets["ee"].get("PROJECT_ID", "garbage-detection-471720")
-SERVICE_ACCOUNT = st.secrets["ee"]["SERVICE_ACCOUNT"]
-PRIVATE_KEY = st.secrets["ee"]["PRIVATE_KEY"]  # full JSON string
+# ========= EARTH ENGINE INIT (via Streamlit Secrets) =========
+def _get_ee_cfg():
+    ee_secrets = st.secrets.get("ee", {})
+    return {
+        "PROJECT_ID": ee_secrets.get("PROJECT_ID", "garbage-detection-471720"),
+        "SERVICE_ACCOUNT": ee_secrets.get("SERVICE_ACCOUNT", ""),
+        "PRIVATE_KEY": ee_secrets.get("PRIVATE_KEY", ""),  # full JSON (string or dict)
+    }
 
-# ------------ EE INIT (Service Account) ------------
-credentials = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, PRIVATE_KEY)
-ee.Initialize(credentials, project=PROJECT_ID)
+CFG = _get_ee_cfg()
 
-# ------------ HELPERS ------------
+def init_ee(cfg):
+    if not cfg["SERVICE_ACCOUNT"] or not cfg["PRIVATE_KEY"]:
+        st.error(
+            "Missing SERVICE_ACCOUNT or PRIVATE_KEY in Streamlit Secrets.\n"
+            "Add them under Settings → Secrets → [ee]."
+        )
+        st.stop()
+
+    key_json = cfg["PRIVATE_KEY"]
+    if isinstance(key_json, dict):
+        key_json = json.dumps(key_json)
+
+    # If a path was accidentally pasted, try to read it; otherwise assume JSON string
+    if not str(key_json).strip().startswith("{"):
+        with open(key_json, "r", encoding="utf-8") as f:
+            key_json = f.read()
+
+    creds = ee.ServiceAccountCredentials(cfg["SERVICE_ACCOUNT"], key_data=key_json)
+    ee.Initialize(creds, project=cfg["PROJECT_ID"])
+    st.caption(f"EE ready · project: {cfg['PROJECT_ID']} · SA: {cfg['SERVICE_ACCOUNT']}")
+
+init_ee(CFG)
+
+# ================== EE HELPERS ==================
 def month_seq(start, end):
     s = ee.Date(start); e = ee.Date(end)
     n = e.difference(s, 'month').int()
@@ -50,16 +81,20 @@ def s1_monthly(aoi, d):
 def period_stack(aoi, start, end):
     months = month_seq(start, end)
     def mstack(d):
+        d = ee.Date(d)
         s2 = s2_monthly(aoi, d).select(['B4','B3','B2','NDVI','NDBI','NDWI'])
         s1 = s1_monthly(aoi, d).select(['VV','VH'])
         return s2.addBands(s1)
-    return ee.ImageCollection(ee.List(months).map(lambda m: mstack(m))).median()
+    return ee.ImageCollection(ee.List(months).map(mstack)).median()
 
-def debris_mask_from_pre_post(pre, post, qlow=35, qhigh=65, fb={'NDVI_MAX':0.30,'NDBI_MIN':0.015,'NDWI_MAX':0.15,'VV_MIN_DB':-13}):
-    AOI = pre.geometry()
+def debris_mask_from_pre_post(pre, post, qlow=35, qhigh=65,
+                              fb={'NDVI_MAX':0.30,'NDBI_MIN':0.015,'NDWI_MAX':0.15,'VV_MIN_DB':-13}):
+    aoi = pre.geometry()
     qbands = ['NDVI','NDBI','NDWI','VV']
-    qpre  = pre.select(qbands).reduceRegion(ee.Reducer.percentile([qlow, qhigh]), AOI, 1000, bestEffort=True, maxPixels=1e9)
-    qpost = post.select(qbands).reduceRegion(ee.Reducer.percentile([qlow, qhigh]), AOI, 1000, bestEffort=True, maxPixels=1e9)
+    qpre  = pre.select(qbands).reduceRegion(ee.Reducer.percentile([qlow, qhigh]),
+                                            aoi, 1000, bestEffort=True, maxPixels=1e9)
+    qpost = post.select(qbands).reduceRegion(ee.Reducer.percentile([qlow, qhigh]),
+                                             aoi, 1000, bestEffort=True, maxPixels=1e9)
     G = lambda q,k,fbv: ee.Number(ee.Algorithms.If(q.get(k), q.get(k), fbv))
     ndvi_drop = post.select('NDVI').lt(G(qpre, f'NDVI_p{qlow}',  fb['NDVI_MAX']))
     ndbi_rise = post.select('NDBI').gt(G(qpost,f'NDBI_p{qhigh}', fb['NDBI_MIN']))
@@ -79,14 +114,21 @@ def to_vec(mask_img, aoi):
         return f.set({'area_ha': area_ha, 'compact': compact, 'lon': cen.get(0), 'lat': cen.get(1)})
     return ee.FeatureCollection(vec_raw.map(add_attrs))
 
-# ------------ UI ------------
+# ================== UI ==================
+DEFAULT_AOI = [78.2, 17.1, 78.7, 17.65]  # Hyderabad-ish
+
 st.set_page_config(page_title="Civic Risk Dashboard", layout="wide", page_icon="🗺️")
-st.title("🗺️ Civic Risk Dashboard — Landfills, Water, Flood (Hyderabad demo)")
+st.title("🗺️ Civic Risk Dashboard — Landfills & Water (Hyderabad demo)")
 
 with st.sidebar:
     st.subheader("Area of Interest")
-    lon1, lat1, lon2, lat2 = st.text_input("AOI lon1,lat1,lon2,lat2", ",".join(map(str, DEFAULT_AOI))).split(",")
-    AOI = ee.Geometry.Rectangle([float(lon1), float(lat1), float(lon2), float(lat2)]).buffer(2000)
+    aoi_str = st.text_input("AOI lon1,lat1,lon2,lat2", ",".join(map(str, DEFAULT_AOI)))
+    try:
+        lon1, lat1, lon2, lat2 = [float(x) for x in aoi_str.split(",")]
+    except Exception:
+        st.error("AOI must be 'lon1,lat1,lon2,lat2'")
+        st.stop()
+    AOI = ee.Geometry.Rectangle([lon1, lat1, lon2, lat2]).buffer(2000)
 
     st.subheader("Windows (YYYY-MM-DD)")
     pre_start  = st.text_input("PRE start",  "2023-10-01")
@@ -94,78 +136,62 @@ with st.sidebar:
     post_start = st.text_input("POST start", "2024-10-01")
     post_end   = st.text_input("POST end",   "2024-12-31")
 
+    st.subheader("Thresholds")
     qlow  = st.slider("Low quantile",  10, 49, 35)
     qhigh = st.slider("High quantile", 51, 90, 65)
     ndwi_thr = st.slider("Water NDWI >", 0.0, 0.5, 0.20, 0.01)
-    near_water_m = st.slider("Garbage-near-water buffer (m)", 10, 200, 50, 5)
+    near_water_m = st.slider("Garbage-near-water buffer (meters)", 10, 200, 50, 5)
 
-    if st.button("Compute / Refresh"):
-        st.session_state["go"] = True
+    compute = st.button("Compute / Refresh", type="primary")
 
-# ------------ Compute ------------
-if st.session_state.get("go", True):
-    # stacks
+# ================== COMPUTE ==================
+if compute or ("_first" not in st.session_state):
+    st.session_state["_first"] = True
+
+    # Build stacks
     pre  = period_stack(AOI, pre_start,  pre_end)
     post = period_stack(AOI, post_start, post_end)
 
-    # masks
+    # Masks
     debris = debris_mask_from_pre_post(pre, post, qlow, qhigh)
     water  = post.select('NDWI').gt(ndwi_thr).selfMask()
-    near   = debris.focal_max(kernel=ee.Kernel.circle(near_water_m, 'meters')).And(water.unmask(0)).selfMask()
+    # ✅ Proper focal buffer in meters (no kernel object passed to radius)
+    near   = debris.focal_max(near_water_m, 'meters').And(water.unmask(0)).selfMask()
 
-    # vectors
+    # Vectors (light)
     debris_vec = to_vec(debris, AOI)
     near_vec   = to_vec(near, AOI)
 
-    # map
-    m = geemap.Map(center=[(float(lat1)+float(lat2))/2,(float(lon1)+float(lon2))/2], zoom=11, draw_export=False)
+    # ---- Map
+    m = geemap.Map(center=[(lat1+lat2)/2, (lon1+lon2)/2], zoom=11, draw_export=False)
     m.add_basemap('HYBRID')
-    m.add_layer(geemap.ee_tile_layer(pre.select(['B4','B3','B2']).visualize(min=0,max=3000), {}, "PRE (RGB)"))
+    m.add_layer(geemap.ee_tile_layer(pre.select(['B4','B3','B2']).visualize(min=0,max=3000),  {}, "PRE (RGB)"))
     m.add_layer(geemap.ee_tile_layer(post.select(['B4','B3','B2']).visualize(min=0,max=3000), {}, "POST (RGB)"))
-    m.add_layer(geemap.ee_tile_layer(debris.visualize(palette=['#ff0000'], min=0, max=1), {}, "Debris"))
-    m.add_layer(geemap.ee_tile_layer(water.visualize(palette=['#81d4fa'], min=0, max=1), {}, "Water"))
-    m.add_layer(geemap.ee_tile_layer(near.visualize(palette=['#9c27b0'], min=0, max=1), {}, "Garbage near water"))
-    st_data = st_folium(m, width=1200, height=700)
+    m.add_layer(geemap.ee_tile_layer(debris.visualize(palette=['#ff0000'], min=0, max=1), {}, "Debris / Landfill"))
+    m.add_layer(geemap.ee_tile_layer(water.visualize(palette=['#81d4fa'],  min=0, max=1), {}, "Water (NDWI)"))
+    m.add_layer(geemap.ee_tile_layer(near.visualize(palette=['#9c27b0'],   min=0, max=1), {}, "Garbage near water"))
 
-    # simple table
-    st.subheader("Debris candidate polygons (sample)")
+    st_folium(m, width=1200, height=700)
+
+    # ---- Table (best-effort)
+    st.subheader("Debris candidate polygons (sample up to 50)")
     try:
         gdf = geemap.ee_to_gdf(debris_vec.limit(50))
         st.dataframe(gdf[["area_ha","compact","geometry"]].head(20))
-    except Exception:
-        st.info("Large AOI — download the GeoJSON export instead.")
+    except Exception as e:
+        st.info("Large AOI or conversion issue — queue a Drive export to get full GeoJSON.")
+        st.caption(f"(debug: {e})")
 
-    # export buttons
-    if st.button("Queue GeoJSON export (Drive)"):
+    # ---- Export button
+    if st.button("Queue GeoJSON export to Google Drive"):
         ee.batch.Export.table.toDrive(
             collection=debris_vec,
             description='debris_sites_geojson',
             folder='gee_civic_outputs',
             fileNamePrefix='debris_sites_geojson',
-            fileFormat='GeoJSON').start()
+            fileFormat='GeoJSON'
+        ).start()
         st.success("Export queued → Drive/gee_civic_outputs")
 
-import os, json, streamlit as st, ee, geemap.foliumap as geemap
-
-def _get_ee_cfg():
-    ee_secrets = st.secrets.get("ee", {})
-    return {
-        "PROJECT_ID": ee_secrets.get("PROJECT_ID", "garbage-detection-471720"),
-        "SERVICE_ACCOUNT": ee_secrets.get("SERVICE_ACCOUNT"),
-        "PRIVATE_KEY": ee_secrets.get("PRIVATE_KEY"),
-    }
-
-CFG = _get_ee_cfg()
-
-def init_ee(cfg):
-    if not (cfg["SERVICE_ACCOUNT"] and cfg["PRIVATE_KEY"]):
-        st.error("Missing SERVICE_ACCOUNT/PRIVATE_KEY in secrets. Add them in Settings → Secrets.")
-        st.stop()
-    key_json = cfg["PRIVATE_KEY"]
-    if isinstance(key_json, dict):
-        key_json = json.dumps(key_json)
-    creds = ee.ServiceAccountCredentials(cfg["SERVICE_ACCOUNT"], key_data=key_json)
-    ee.Initialize(creds, project=cfg["PROJECT_ID"])
-    st.caption(f"EE ready · project: {cfg['PROJECT_ID']} · SA: {cfg['SERVICE_ACCOUNT']}")
-
-init_ee(CFG)
+else:
+    st.info("Use the sidebar to set AOI and click **Compute / Refresh**.")
