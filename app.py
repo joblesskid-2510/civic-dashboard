@@ -144,3 +144,28 @@ if st.session_state.get("go", True):
             fileNamePrefix='debris_sites_geojson',
             fileFormat='GeoJSON').start()
         st.success("Export queued → Drive/gee_civic_outputs")
+
+import os, json, streamlit as st, ee, geemap.foliumap as geemap
+
+def _get_ee_cfg():
+    ee_secrets = st.secrets.get("ee", {})
+    return {
+        "PROJECT_ID": ee_secrets.get("PROJECT_ID", "garbage-detection-471720"),
+        "SERVICE_ACCOUNT": ee_secrets.get("SERVICE_ACCOUNT"),
+        "PRIVATE_KEY": ee_secrets.get("PRIVATE_KEY"),
+    }
+
+CFG = _get_ee_cfg()
+
+def init_ee(cfg):
+    if not (cfg["SERVICE_ACCOUNT"] and cfg["PRIVATE_KEY"]):
+        st.error("Missing SERVICE_ACCOUNT/PRIVATE_KEY in secrets. Add them in Settings → Secrets.")
+        st.stop()
+    key_json = cfg["PRIVATE_KEY"]
+    if isinstance(key_json, dict):
+        key_json = json.dumps(key_json)
+    creds = ee.ServiceAccountCredentials(cfg["SERVICE_ACCOUNT"], key_data=key_json)
+    ee.Initialize(creds, project=cfg["PROJECT_ID"])
+    st.caption(f"EE ready · project: {cfg['PROJECT_ID']} · SA: {cfg['SERVICE_ACCOUNT']}")
+
+init_ee(CFG)
