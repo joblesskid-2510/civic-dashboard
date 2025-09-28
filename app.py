@@ -1,53 +1,39 @@
-# app.py — Civic Risk Dashboard (debris/landfill + water + “garbage near water”)
-# Streamlit + Earth Engine (Service Account via st.secrets)
+# ---------------------------------------------------------------
+# Civic Risk Mini-Dashboard (Streamlit + EE, fast & reliable)
+# - No geemap (avoids heavy deps); uses Folium tiles directly
+# - Renders UI immediately; only computes after a button click
+# - Layers: PRE/POST RGB, Debris/Landfill, Water (NDWI), Near-water garbage
+# - Drive export for debris polygons
 # ---------------------------------------------------------------
 
-import os, json, math, datetime
-import numpy as np
-import pandas as pd
+import json, math
 import streamlit as st
-from PIL import Image, ImageDraw
-import folium
 from streamlit_folium import st_folium
-
+import folium
 import ee
-import geemap.foliumap as geemap
 
-# ========= EARTH ENGINE INIT (via Streamlit Secrets) =========
-def _get_ee_cfg():
-    ee_secrets = st.secrets.get("ee", {})
-    return {
-        "PROJECT_ID": ee_secrets.get("PROJECT_ID", "garbage-detection-471720"),
-        "SERVICE_ACCOUNT": ee_secrets.get("SERVICE_ACCOUNT", ""),
-        "PRIVATE_KEY": ee_secrets.get("PRIVATE_KEY", ""),  # full JSON (string or dict)
-    }
+# ========= YOUR SERVICE ACCOUNT KEY (as JSON string) =========
+KEY_JSON = r'''{
+  "type": "service_account",
+  "project_id": "garbage-detection-471720",
+  "private_key_id": "7b9bc725548da94b4d03564c66fb360b420c41b2",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDMZguFOkN/EiGn\n1U5TdldAB8jyfMyP+ETbYkf/QncLFL7BohWscJbxuM2S292hnYuF9WFO+jAhBH8E\nvkGSDdagdwTj/WrmhWYjwvbJw1IfuAF1pomaXtl9PIfIY2XkeMtwdNXYUDJ/f2in\ndADxSJlpuFga6syIFSrgdHS0+kGxIzfqm+kWVjLs/REiB6f9I4IXqb/PmTrDT8BC\npVCX6ocBrELOwO7zrzg28wKMaEg4npUuzAgQLFrxXtuH0MLMF546U5Dv9fXYxr6a\n49zH8zBJyhqRZXdeKIwgfanwSHhgzMasrS1wO0bN9SBo0oihPQ8sSQBghYnVb2Tr\n5hfhkrKzAgMBAAECggEASfIi+dRtxcNr/JltSEGYaBhI6P0gTnd9hbbFIEJN6erb\n5hZ669MhsJpweNBlGopyBwkSZq2ZiuBjCXbBJxMtkgjs8oRkT7h0Dr0CZlTs2X/K\nu2MABiKJYUbsQqE/JAxVYT5LfQHqevi/hlEv5BqlMbuY2EgYraSmyeQnsq+U432Z\n1Iu1Mrf7c7b70AgR/waieIsRBpuUXCoPcpFtEcW/ABQ67x+RYnJe7sPbSbdEN6Lm\nLvcysklt6Zrxinpi6fDp7zxguZLZNHw3EDD8v3swVpErl8A8lL+Gk4wEzicG29LQ\nh9srEZS2HaiJN4nYPlfzrYF07Kd8BnQE37MX7vLCRQKBgQD10iPP+TeNEnzSckyg\njhgBWLYFP83pEpaEBH2TieIY+LsbRyOUxSv6Mjg7qaWlCQ1sKlhuw8mnyJe9j6dP\n983RfAUe2GHhTAf4R6bD1NA9r6y360s3Kun85eAQFTlEpLnvvZfqMn29hq0JwK2S\ngPfDk1JVuDd5cP+ov61yZkD+ZQKBgQDU3M1xdWLdHiAhwpmo1OfjSp7z2cFHJOHn\nAc4EL4iifYpLEMB8nqVY1nAtZ+sMGtRWg3ZRaOOjxy/6vQqwI3Y3T8wng+hVnzLi\nMxVlbuWDPDtNmEdC6navoY0dclkw3Tr8Wa7o70zIXmsvyW/3t3VnF+w/eInUtIfi\nnUfhSxGvNwKBgDeIGkkAPrlixMnxwje/AdNEDBKRgF23skLulMPAsU/82J/n6TTR\negbSU3u+7kmjCuI1irazChoaKZVMH3rkOx2oy6tVLH9t4psG7LhumgBlcDo4MEyt\nKCDWeVCIyuAj6lErXmcsstUe2HZMjal78vy+iioNLJMFoOupKXCfgu01AoGBALoF\ncIDbvhdQ8XGvd8ukrDXlC349aXw8DjNsT1c3Fygxn/6z2BPQLN2zIPt9WlsMw04L\nuwWwLWf+db6hIEsH4pK56McLrqnM45HsZKFtRaPnqkfIcVZYQnqAKyt1t95NJ/RK\nh+HG5wogAXoUhwYrzKzYqjxZodJCJpJzMtL/YKgHAoGBAOcLt+aW/2FWHWmRZooh\nVn7oyqgyiTEu/ElJOIJDN7pxkunZ60rrHZGNAl6aoyhCx5qULe5yvX0fGXfYmxCn\n1dhKDh5TyOGGAaEavyS+jfgzw30qlA0WbyKcg8MaTKkNQsxqh06+nHZ74gw//aLl\nXu/BFRd6pGdKjwNRfysrGh2H\n-----END PRIVATE KEY-----\n",
+  "client_email": "civic-dashboard@garbage-detection-471720.iam.gserviceaccount.com",
+  "client_id": "107955791999220600617",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/civic-dashboard%40garbage-detection-471720.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}'''
+SERVICE_ACCOUNT = "civic-dashboard@garbage-detection-471720.iam.gserviceaccount.com"
+PROJECT_ID      = "garbage-detection-471720"
 
-CFG = _get_ee_cfg()
+# ========= INIT EE EARLY, BUT LIGHTWEIGHT =========
+creds = ee.ServiceAccountCredentials(SERVICE_ACCOUNT, key_data=KEY_JSON)
+ee.Initialize(creds, project=PROJECT_ID)
 
-def init_ee(cfg):
-    if not cfg["SERVICE_ACCOUNT"] or not cfg["PRIVATE_KEY"]:
-        st.error(
-            "Missing SERVICE_ACCOUNT or PRIVATE_KEY in Streamlit Secrets.\n"
-            "Add them under Settings → Secrets → [ee]."
-        )
-        st.stop()
-
-    key_json = cfg["PRIVATE_KEY"]
-    if isinstance(key_json, dict):
-        key_json = json.dumps(key_json)
-
-    # If a path was accidentally pasted, try to read it; otherwise assume JSON string
-    if not str(key_json).strip().startswith("{"):
-        with open(key_json, "r", encoding="utf-8") as f:
-            key_json = f.read()
-
-    creds = ee.ServiceAccountCredentials(cfg["SERVICE_ACCOUNT"], key_data=key_json)
-    ee.Initialize(creds, project=cfg["PROJECT_ID"])
-    st.caption(f"EE ready · project: {cfg['PROJECT_ID']} · SA: {cfg['SERVICE_ACCOUNT']}")
-
-init_ee(CFG)
-
-# ================== EE HELPERS ==================
+# ========= SMALL EE HELPERS =========
 def month_seq(start, end):
     s = ee.Date(start); e = ee.Date(end)
     n = e.difference(s, 'month').int()
@@ -91,10 +77,8 @@ def debris_mask_from_pre_post(pre, post, qlow=35, qhigh=65,
                               fb={'NDVI_MAX':0.30,'NDBI_MIN':0.015,'NDWI_MAX':0.15,'VV_MIN_DB':-13}):
     aoi = pre.geometry()
     qbands = ['NDVI','NDBI','NDWI','VV']
-    qpre  = pre.select(qbands).reduceRegion(ee.Reducer.percentile([qlow, qhigh]),
-                                            aoi, 1000, bestEffort=True, maxPixels=1e9)
-    qpost = post.select(qbands).reduceRegion(ee.Reducer.percentile([qlow, qhigh]),
-                                             aoi, 1000, bestEffort=True, maxPixels=1e9)
+    qpre  = pre.select(qbands).reduceRegion(ee.Reducer.percentile([qlow, qhigh]), aoi, 1000, bestEffort=True, maxPixels=1e9)
+    qpost = post.select(qbands).reduceRegion(ee.Reducer.percentile([qlow, qhigh]), aoi, 1000, bestEffort=True, maxPixels=1e9)
     G = lambda q,k,fbv: ee.Number(ee.Algorithms.If(q.get(k), q.get(k), fbv))
     ndvi_drop = post.select('NDVI').lt(G(qpre, f'NDVI_p{qlow}',  fb['NDVI_MAX']))
     ndbi_rise = post.select('NDBI').gt(G(qpost,f'NDBI_p{qhigh}', fb['NDBI_MIN']))
@@ -103,6 +87,12 @@ def debris_mask_from_pre_post(pre, post, qlow=35, qhigh=65,
     m = ndvi_drop.And(ndbi_rise).And(ndwi_drop).And(vv_rise).selfMask()
     return m.connectedPixelCount(100, True).gte(15).selfMask()
 
+def ee_tile(image, vis, name):
+    """Create a Folium tile layer from an ee.Image (non-blocking)."""
+    info = image.getMapId(vis)
+    return folium.TileLayer(tiles=info["tile_fetcher"].url_format,
+                            attr="Google Earth Engine", name=name, overlay=True, control=True)
+
 def to_vec(mask_img, aoi):
     vec_raw = mask_img.reduceToVectors(geometry=aoi, geometryType='polygon', scale=10, maxPixels=1e13)
     def add_attrs(f):
@@ -110,23 +100,19 @@ def to_vec(mask_img, aoi):
         area_m2 = g.area(10); perim = g.perimeter(10)
         area_ha = area_m2.divide(10000)
         compact = ee.Number(4*math.pi).multiply(area_m2).divide(perim.pow(2))
-        cen = g.centroid(10).coordinates()
-        return f.set({'area_ha': area_ha, 'compact': compact, 'lon': cen.get(0), 'lat': cen.get(1)})
+        return f.set({'area_ha': area_ha, 'compact': compact})
     return ee.FeatureCollection(vec_raw.map(add_attrs))
 
-# ================== UI ==================
-DEFAULT_AOI = [78.2, 17.1, 78.7, 17.65]  # Hyderabad-ish
-
-st.set_page_config(page_title="Civic Risk Dashboard", layout="wide", page_icon="🗺️")
-st.title("🗺️ Civic Risk Dashboard — Landfills & Water (Hyderabad demo)")
+# ================== STREAMLIT UI ==================
+st.set_page_config(page_title="Civic Risk (EE)", layout="wide", page_icon="🗺️")
+st.title("🗺️ Civic Risk — Landfills & Water (Hyderabad demo)")
 
 with st.sidebar:
     st.subheader("Area of Interest")
-    aoi_str = st.text_input("AOI lon1,lat1,lon2,lat2", ",".join(map(str, DEFAULT_AOI)))
+    aoi_str = st.text_input("AOI lon1,lat1,lon2,lat2", "78.2,17.1,78.7,17.65")
     try:
         lon1, lat1, lon2, lat2 = [float(x) for x in aoi_str.split(",")]
-    except Exception:
-        st.error("AOI must be 'lon1,lat1,lon2,lat2'")
+    except:
         st.stop()
     AOI = ee.Geometry.Rectangle([lon1, lat1, lon2, lat2]).buffer(2000)
 
@@ -140,58 +126,51 @@ with st.sidebar:
     qlow  = st.slider("Low quantile",  10, 49, 35)
     qhigh = st.slider("High quantile", 51, 90, 65)
     ndwi_thr = st.slider("Water NDWI >", 0.0, 0.5, 0.20, 0.01)
-    near_water_m = st.slider("Garbage-near-water buffer (meters)", 10, 200, 50, 5)
+    near_water_m = st.slider("Near-water buffer (m)", 10, 200, 50, 5)
 
     compute = st.button("Compute / Refresh", type="primary")
 
-# ================== COMPUTE ==================
-if compute or ("_first" not in st.session_state):
-    st.session_state["_first"] = True
+# Show a small “ready” note so users know the app didn’t crash
+st.caption(f"EE ready · project: {PROJECT_ID} · SA: {SERVICE_ACCOUNT}")
 
-    # Build stacks
+# Only compute when the user clicks
+if not compute:
+    st.info("Set AOI & parameters in the sidebar, then click **Compute / Refresh**.")
+    st.stop()
+
+with st.spinner("Building composites & masks…"):
     pre  = period_stack(AOI, pre_start,  pre_end)
     post = period_stack(AOI, post_start, post_end)
-
-    # Masks
     debris = debris_mask_from_pre_post(pre, post, qlow, qhigh)
     water  = post.select('NDWI').gt(ndwi_thr).selfMask()
-    # ✅ Proper focal buffer in meters (no kernel object passed to radius)
-    near   = debris.focal_max(near_water_m, 'meters').And(water.unmask(0)).selfMask()
+    # Use float radius in meters (no Kernel object)
+    near   = debris.focal_max(float(near_water_m), 'meters').And(water.unmask(0)).selfMask()
 
-    # Vectors (light)
+# ============== MAP (Folium, non-blocking tiles) ==============
+m = folium.Map(location=[(lat1+lat2)/2, (lon1+lon2)/2], zoom_start=11, control_scale=True, tiles="CartoDB positron")
+
+# PRE/POST
+ee_tile(pre.select(['B4','B3','B2']),  {'min':0,'max':3000}, "PRE (RGB)").add_to(m)
+ee_tile(post.select(['B4','B3','B2']), {'min':0,'max':3000}, "POST (RGB)").add_to(m)
+
+# Overlays
+ee_tile(debris, {'palette':['#ff0000'], 'min':0, 'max':1}, "Debris / Landfill").add_to(m)
+ee_tile(water,  {'palette':['#81d4fa'], 'min':0, 'max':1}, "Water (NDWI)").add_to(m)
+ee_tile(near,   {'palette':['#9c27b0'], 'min':0, 'max':1}, "Garbage near water").add_to(m)
+folium.LayerControl(collapsed=False).add_to(m)
+
+# Render
+st_data = st_folium(m, width=1200, height=720)
+
+# ============== EXPORTS (Drive) =================
+st.subheader("Export")
+if st.button("Queue debris polygons (GeoJSON) to Google Drive"):
     debris_vec = to_vec(debris, AOI)
-    near_vec   = to_vec(near, AOI)
-
-    # ---- Map
-    m = geemap.Map(center=[(lat1+lat2)/2, (lon1+lon2)/2], zoom=11, draw_export=False)
-    m.add_basemap('HYBRID')
-    m.add_layer(geemap.ee_tile_layer(pre.select(['B4','B3','B2']).visualize(min=0,max=3000),  {}, "PRE (RGB)"))
-    m.add_layer(geemap.ee_tile_layer(post.select(['B4','B3','B2']).visualize(min=0,max=3000), {}, "POST (RGB)"))
-    m.add_layer(geemap.ee_tile_layer(debris.visualize(palette=['#ff0000'], min=0, max=1), {}, "Debris / Landfill"))
-    m.add_layer(geemap.ee_tile_layer(water.visualize(palette=['#81d4fa'],  min=0, max=1), {}, "Water (NDWI)"))
-    m.add_layer(geemap.ee_tile_layer(near.visualize(palette=['#9c27b0'],   min=0, max=1), {}, "Garbage near water"))
-
-    st_folium(m, width=1200, height=700)
-
-    # ---- Table (best-effort)
-    st.subheader("Debris candidate polygons (sample up to 50)")
-    try:
-        gdf = geemap.ee_to_gdf(debris_vec.limit(50))
-        st.dataframe(gdf[["area_ha","compact","geometry"]].head(20))
-    except Exception as e:
-        st.info("Large AOI or conversion issue — queue a Drive export to get full GeoJSON.")
-        st.caption(f"(debug: {e})")
-
-    # ---- Export button
-    if st.button("Queue GeoJSON export to Google Drive"):
-        ee.batch.Export.table.toDrive(
-            collection=debris_vec,
-            description='debris_sites_geojson',
-            folder='gee_civic_outputs',
-            fileNamePrefix='debris_sites_geojson',
-            fileFormat='GeoJSON'
-        ).start()
-        st.success("Export queued → Drive/gee_civic_outputs")
-
-else:
-    st.info("Use the sidebar to set AOI and click **Compute / Refresh**.")
+    ee.batch.Export.table.toDrive(
+        collection=debris_vec,
+        description='debris_sites_geojson',
+        folder='gee_civic_outputs',
+        fileNamePrefix='debris_sites_geojson',
+        fileFormat='GeoJSON'
+    ).start()
+    st.success("Export queued → Drive/gee_civic_outputs")
