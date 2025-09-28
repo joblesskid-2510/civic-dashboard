@@ -6,3 +6,9 @@ geemap>=0.32.0
 pandas
 numpy
 Pillow
+
+
+earthengine-api
+
+
+
