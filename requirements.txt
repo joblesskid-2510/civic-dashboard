@@ -1,0 +1,8 @@
+streamlit
+streamlit-folium
+folium
+earthengine-api
+geemap>=0.32.0
+pandas
+numpy
+Pillow
